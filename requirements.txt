@@ -1,0 +1,16 @@
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=1.5.0
+
+# MONAI for medical imaging (SwinUNETR backbone)
+monai>=1.3.0
+
+# Visualization and progress
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# CUDA version compatibility
+# This configuration was tested with CUDA 11.7 and cuDNN 8.5
