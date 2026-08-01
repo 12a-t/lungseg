@@ -1,23 +1,32 @@
-# lungseg
-Official implementation of DSSW-Net for 3D lung nodule segmentation
-MIT License
+# DSSW-Net: Dual-Stream Swin-Wavelet Network for 3D Lung Nodule Segmentation
 
-Copyright (c) 2026 The DSSW-Net Authors
+Official PyTorch implementation of **DSSW-Net**, a dual-stream architecture for accurate 3D lung nodule segmentation, published in **Medical Physics (2026)**.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+## 📄 Paper
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+DSSW-Net: Dual-Stream Swin-Wavelet Network with Structure-Frequency Awareness for 3D Lung Nodule Segmentation
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+*Medical Physics, 2026*
+
+[Link to paper - DOI to be added]
+
+## 🏗️ Architecture Overview
+
+DSSW-Net employs a dual-stream encoder design:
+
+- **Semantic Stream**: Swin Transformer backbone with Structure-Aware Parallel Modules for global context modeling
+- **Detail Stream**: Wavelet-CNN branch using 3D Discrete Wavelet Transform (DWT) for high-frequency feature preservation
+- **Feature Fusion**: Asymmetric dual-stream fusion with bidirectional cross-attention
+- **Reconstruction**: Wavelet-Enhanced Reconstruction Module (WERM) with inverse DWT for boundary refinement
+
+## ⚙️ Requirements
+
+- Python 3.8+
+- CUDA 11.7 (recommended)
+- PyTorch 2.0+
+- MONAI 1.3.0+
+
+Install all dependencies:
+
+```bash
+pip install -r requirements.txt
