@@ -11,8 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 import scipy.ndimage
 from scipy.ndimage import affine_transform
 
-# ================= 基本尺寸配置 =================
-INPUT_SIZE = 96  # 使用完整的96x96x96 ROI
+INPUT_SIZE = 64
 SAVED_SIZE = 96
 
 RANDOM_SHIFT_PROB = 0.3
@@ -23,7 +22,7 @@ RESIZE_MIN_SCALE = 0.85
 RESIZE_MAX_SCALE = 1.15
 
 ROTATION_PROB = 0.5
-MAX_ANGLE = 15  # degrees
+MAX_ANGLE = 15
 
 SMALL_NODULE_THRESH = 10
 LARGE_NODULE_THRESH = 30
@@ -51,6 +50,8 @@ class LIDCDataset(Dataset):
         self.mask_dir = mask_dir
         self.input_size = input_size
         self.saved_size = saved_size
+        self.total_buffer = saved_size - input_size
+        self.center_start_idx = self.total_buffer // 2
         self.subset = subset
         self.shift_prob = shift_prob
         self.max_shift = max_shift
@@ -123,21 +124,17 @@ class LIDCDataset(Dataset):
         return self._fit_to_shape(img_zoom, (D, H, W)), self._fit_to_shape(mask_zoom, (D, H, W))
 
     def _random_rotation_3d(self, img: np.ndarray, mask: np.ndarray, max_angle: float):
-        """Random 3D rotation within ±max_angle degrees."""
         angle = random.uniform(-max_angle, max_angle)
         rad = np.radians(angle)
 
-        # Rotation matrix around Z-axis
         cos_a, sin_a = np.cos(rad), np.sin(rad)
         rot_matrix = np.array([[cos_a, -sin_a, 0],
                                [sin_a, cos_a, 0],
                                [0, 0, 1]])
 
-        # Apply rotation to image (order=1 for interpolation)
         img_rot = affine_transform(
             img, rot_matrix, order=1, mode='nearest'
         )
-        # Apply rotation to mask (order=0 for nearest-neighbor to preserve binary values)
         mask_rot = affine_transform(
             mask, rot_matrix, order=0, mode='nearest'
         )
@@ -179,9 +176,7 @@ class LIDCDataset(Dataset):
         img_crop = img[z_start:z_end, y_start:y_end, x_start:x_end]
         mask_crop = mask[z_start:z_end, y_start:y_end, x_start:x_end]
 
-        # ---- Data Augmentation (training only) ----
         if self.subset == 'train':
-            # 1. Random scaling (0.85 to 1.15)
             if random.random() < self.resize_prob:
                 bbox_local = self._get_mask_bbox(mask_crop)
                 if bbox_local is not None:
@@ -196,7 +191,6 @@ class LIDCDataset(Dataset):
                     if abs(scale - 1.0) > 1e-6:
                         img_crop, mask_crop = self._scale_patch(img_crop, mask_crop, scale)
 
-            # 2. Random flipping (horizontal and vertical)
             if random.random() < 0.5:
                 img_crop = np.flip(img_crop, axis=2).copy()
                 mask_crop = np.flip(mask_crop, axis=2).copy()
@@ -204,23 +198,19 @@ class LIDCDataset(Dataset):
                 img_crop = np.flip(img_crop, axis=1).copy()
                 mask_crop = np.flip(mask_crop, axis=1).copy()
 
-            # 3. Random 3D rotation (±15°)
             if random.random() < self.rotation_prob:
                 img_crop, mask_crop = self._random_rotation_3d(img_crop, mask_crop, self.max_angle)
 
-        # Normalize: clip to [-1000, 400] HU and map to [0, 1]
         MIN_HU, MAX_HU = -1000.0, 400.0
         img_norm = np.clip(img_crop, MIN_HU, MAX_HU)
         img_norm = (img_norm - MIN_HU) / (MAX_HU - MIN_HU)
 
-        # Random Gaussian noise (training only)
         if self.subset == 'train' and random.random() < 0.2:
             noise = np.random.normal(0.0, 0.02, img_norm.shape)
             img_norm = np.clip(img_norm + noise, 0.0, 1.0)
 
-        # Add channel dimension
-        img_norm = np.expand_dims(img_norm, axis=0)   # [1, D, H, W]
-        mask_crop = np.expand_dims(mask_crop, axis=0)  # [1, D, H, W]
+        img_norm = np.expand_dims(img_norm, axis=0)
+        mask_crop = np.expand_dims(mask_crop, axis=0)
 
         return torch.from_numpy(img_norm), torch.from_numpy(mask_crop)
 
