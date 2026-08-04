@@ -24,7 +24,7 @@ MASK_DIR = os.path.join(DATA_ROOT, "masks")
 CHECKPOINT_DIR = "./checkpoints"
 PRETRAINED_PATH = "./pretrained/model_swinvit.pt"
 
-INPUT_SIZE = 96
+INPUT_SIZE = 64
 SAVED_SIZE = 96
 NUM_EPOCHS = 100
 
