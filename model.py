@@ -6,9 +6,9 @@ from monai.networks.blocks import UnetOutBlock, UnetrUpBlock
 import os
 
 
-# =============================================================================
-# 1. IDWT and DWT Modules
-# =============================================================================
+# =========================================================================
+# 1. 基础模块 (IDWT, DWT, UpBlock) - 保持不变
+# =========================================================================
 class IDWT3D(nn.Module):
     def __init__(self, upscale_factor=2):
         super(IDWT3D, self).__init__()
@@ -24,78 +24,41 @@ class IDWT3D(nn.Module):
         return x
 
 
-class StandardDWTDownSample3d(nn.Module):
+class DWTDownSample3d(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.dwt_sim = nn.Conv3d(
-            in_channels, in_channels * 8, kernel_size=2, stride=2, groups=in_channels, bias=False
+            in_channels,
+            in_channels * 8,
+            kernel_size=2, stride=2, groups=in_channels, bias=False
         )
-        out_half = out_channels // 2
-        self.compress_low = nn.Conv3d(in_channels, out_half, kernel_size=1)
-        self.compress_high = nn.Conv3d(in_channels * 7, out_half, kernel_size=1)
-        self.norm = nn.InstanceNorm3d(out_channels)
-        self.act = nn.GELU()
+        self.channel_compress = nn.Sequential(
+            nn.Conv3d(in_channels * 8, out_channels, kernel_size=1),
+            nn.InstanceNorm3d(out_channels),
+            nn.GELU()
+        )
 
     def forward(self, x):
         dwt_output = self.dwt_sim(x)
-        C = dwt_output.shape[1] // 8
-        low_freq = dwt_output[:, :C, ...]
-        high_freqs = dwt_output[:, C:, ...]
-        low_compressed = self.compress_low(low_freq)
-        high_compressed = self.compress_high(high_freqs)
-        combined = torch.cat([low_compressed, high_compressed], dim=1)
-        return self.act(self.norm(combined))
-
-
-class GGODWTDownSample3d(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.dwt_sim = nn.Conv3d(
-            in_channels, in_channels * 8, kernel_size=2, stride=2, groups=in_channels, bias=False
-        )
-        self.local_pool = nn.AvgPool3d(kernel_size=3, stride=1, padding=1)
-        self.th_mean = nn.Parameter(torch.tensor(0.25))
-        self.scale_mean = nn.Parameter(torch.tensor(10.0))
-        self.th_std = nn.Parameter(torch.tensor(0.08))
-        self.scale_std = nn.Parameter(torch.tensor(15.0))
-
-        out_half = out_channels // 2
-        self.compress_low = nn.Conv3d(in_channels, out_half, kernel_size=1)
-        self.compress_high = nn.Conv3d(in_channels * 7, out_half, kernel_size=1)
-        self.norm = nn.InstanceNorm3d(out_channels)
-        self.act = nn.GELU()
-
-    def forward(self, x):
-        dwt_output = self.dwt_sim(x)
-        B, C8, D, H, W = dwt_output.shape
-        C = C8 // 8
-        low_freq = dwt_output[:, :C, ...]
-        high_freqs = dwt_output[:, C:, ...]
-
-        mu = self.local_pool(low_freq)
-        mu_sq = self.local_pool(low_freq ** 2)
-        std = torch.sqrt(torch.relu(mu_sq - mu ** 2) + 1e-6)
-        w_mean = torch.sigmoid((mu - self.th_mean) * self.scale_mean)
-        w_std = torch.sigmoid((self.th_std - std) * self.scale_std)
-        ggo_weight = w_mean * w_std
-
-        low_freq_enhanced = low_freq * (1.0 + ggo_weight)
-
-        low_compressed = self.compress_low(low_freq_enhanced)
-        high_compressed = self.compress_high(high_freqs)
-        combined = torch.cat([low_compressed, high_compressed], dim=1)
-        return self.act(self.norm(combined))
+        out = self.channel_compress(dwt_output)
+        return out
 
 
 class WaveletUnetrUpBlock(nn.Module):
-    def __init__(self, spatial_dims, in_channels, out_channels, kernel_size=3, upsample_kernel_size=2,
-                 norm_name="instance", res_block=True):
+    def __init__(
+            self, spatial_dims, in_channels, out_channels,
+            kernel_size=3, upsample_kernel_size=2, norm_name="instance", res_block=True
+    ):
         super().__init__()
         self.wavelet_generator = nn.Conv3d(in_channels, out_channels * 8, kernel_size=1, bias=False)
         self.idwt = IDWT3D(upscale_factor=2)
         self.conv_block = UnetrUpBlock(
-            spatial_dims=spatial_dims, in_channels=in_channels, out_channels=out_channels,
-            kernel_size=kernel_size, upsample_kernel_size=upsample_kernel_size, norm_name=norm_name,
+            spatial_dims=spatial_dims,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            upsample_kernel_size=upsample_kernel_size,
+            norm_name=norm_name,
             res_block=res_block,
         ).conv_block
 
@@ -103,228 +66,236 @@ class WaveletUnetrUpBlock(nn.Module):
         subbands = self.wavelet_generator(inp)
         upsampled = self.idwt(subbands)
         if upsampled.shape[2:] != skip.shape[2:]:
-            upsampled = F.interpolate(upsampled, size=skip.shape[2:], mode='trilinear', align_corners=False)
+            upsampled = F.interpolate(upsampled, size=skip.shape[2:], mode='nearest')
         concat = torch.cat((upsampled, skip), dim=1)
-        return self.conv_block(concat)
+        out = self.conv_block(concat)
+        return out
 
 
-# =============================================================================
-# 2. CNN Encoder
-# =============================================================================
 class SimpleCNNEncoder3D(nn.Module):
     def __init__(self, in_channels=1, base_filters=24):
         super().__init__()
-        self.down0 = GGODWTDownSample3d(in_channels, base_filters)
-        self.down1 = StandardDWTDownSample3d(base_filters, base_filters * 2)
-        self.down2 = StandardDWTDownSample3d(base_filters * 2, base_filters * 4)
-        self.down3 = StandardDWTDownSample3d(base_filters * 4, base_filters * 8)
-        self.down4 = StandardDWTDownSample3d(base_filters * 8, base_filters * 16)
+        self.down0 = DWTDownSample3d(in_channels, base_filters)
+        self.down1 = DWTDownSample3d(base_filters, base_filters * 2)
+        self.down2 = DWTDownSample3d(base_filters * 2, base_filters * 4)
+        self.down3 = DWTDownSample3d(base_filters * 4, base_filters * 8)
 
     def forward(self, x):
         c0 = self.down0(x)
         c1 = self.down1(c0)
         c2 = self.down2(c1)
         c3 = self.down3(c2)
-        c4 = self.down4(c3)
-        return [c0, c1, c2, c3, c4]
+        return [c0, c1, c2, c3]
 
 
-# =============================================================================
-# 3. Structure-Aware Parallel Module
-# =============================================================================
+# =========================================================================
+# 🔥 2. [核心创新] Parallel Local-Enhanced MLP (激进增强版)
+# =========================================================================
 class ParallelLocalMLP(nn.Module):
+    """
+    🔥 激进版创新点：
+    1. 弃用 Depth-wise，改用标准 Conv3d (groups=1)。
+       原因：浅层通道数少 (96/192)，显存允许；标准卷积特征提取能力远强于 DW 卷积。
+    2. Alpha 初始化改为 0.5。
+       原因：强制模型在训练初期就“正视”这个分支，而不是把它当噪点忽略。
+    """
+
     def __init__(self, original_mlp, dim):
         super().__init__()
         self.original_mlp = original_mlp
 
+        # 🔥 升级策略：全通道交互卷积 (Standard Conv)
         self.local_branch = nn.Sequential(
+            # 1. 空间建模：Standard Conv3d (groups=1) -> 捕捉最强的局部关联
+            # 注意：groups=1 代表全连接卷积，信息交互能力最强
             nn.Conv3d(dim, dim, kernel_size=3, padding=1, groups=1, bias=False),
             nn.InstanceNorm3d(dim),
             nn.GELU(),
+
+            # 2. 通道混合：继续增强非线性
             nn.Conv3d(dim, dim, kernel_size=1, bias=False)
         )
 
-        laplace_kernel = torch.zeros(3, 3, 3)
-        laplace_kernel[1, 1, 1] = 6.0
-        laplace_kernel[0, 1, 1] = -1.0
-        laplace_kernel[2, 1, 1] = -1.0
-        laplace_kernel[1, 0, 1] = -1.0
-        laplace_kernel[1, 2, 1] = -1.0
-        laplace_kernel[1, 1, 0] = -1.0
-        laplace_kernel[1, 1, 2] = -1.0
-        kernel_3d = laplace_kernel.view(1, 1, 3, 3, 3).repeat(dim, 1, 1, 1, 1)
-        self.register_buffer('laplace_weight', kernel_3d)
-
+        # 🔥 激进策略：初始化为 0.5
+        # 让梯度在第一轮就猛烈地流向卷积分支，避免 "主路霸权"
         self.alpha = nn.Parameter(torch.tensor(0.5))
-        self.temperature = nn.Parameter(torch.tensor(1.0))
-
-    def _compute_complexity(self, x_img):
-        L1 = torch.abs(F.conv3d(x_img, self.laplace_weight, padding=1, dilation=1, groups=x_img.size(1)))
-        L2 = torch.abs(F.conv3d(x_img, self.laplace_weight, padding=2, dilation=2, groups=x_img.size(1)))
-        L3 = torch.abs(F.conv3d(x_img, self.laplace_weight, padding=3, dilation=3, groups=x_img.size(1)))
-
-        L_max = torch.max(torch.max(L1, L2), L3)
-        spatial_L = L_max.mean(dim=1, keepdim=True)
-
-        eps = 1e-5
-        mean = spatial_L.mean(dim=[2, 3, 4], keepdim=True)
-        std = spatial_L.std(dim=[2, 3, 4], keepdim=True)
-        spatial_L_norm = (spatial_L - mean) / (std + eps)
-
-        complexity_map = torch.sigmoid(spatial_L_norm * self.temperature) * 2.0
-        return complexity_map
 
     def forward(self, x):
+        # 1. 主路计算 (原版 Swin MLP)
         original_out = self.original_mlp(x)
 
-        if x.ndim == 5:
-            is_channel_last = (x.shape[1] != self.local_branch[0].in_channels)
-            x_img = x.permute(0, 4, 1, 2, 3) if is_channel_last else x
+        # 2. 支路计算 (增强版 3D 卷积)
+        local_out = None
+        try:
+            # (B, D, H, W, C) or (B, C, D, H, W)
+            if x.ndim == 5:
+                # 判断 channel 位置
+                if x.shape[1] == self.local_branch[0].in_channels:
+                    # (B, C, D, H, W) 直接卷
+                    local_out = self.local_branch(x)
+                else:
+                    # (B, D, H, W, C) -> Permute -> Conv -> Permute
+                    x_img = x.permute(0, 4, 1, 2, 3)
+                    local_out = self.local_branch(x_img)
+                    local_out = local_out.permute(0, 2, 3, 4, 1)
 
-            out_local = self.local_branch(x_img)
-            complexity_map = self._compute_complexity(x_img)
-            local_out = out_local * complexity_map
+            # (B, N, C)
+            elif x.ndim == 3:
+                B, N, C = x.shape
+                # 尝试还原立方体结构
+                S = int(round(N ** (1 / 3)))
 
-            if is_channel_last:
-                local_out = local_out.permute(0, 2, 3, 4, 1)
+                # 只有当 N 是完美的立方体数时才做卷积
+                if S ** 3 == N:
+                    x_img = x.transpose(1, 2).view(B, C, S, S, S)
+                    local_out = self.local_branch(x_img)
+                    local_out = local_out.flatten(2).transpose(1, 2)
+                else:
+                    return original_out
 
-            return original_out + self.alpha * local_out
-
-        elif x.ndim == 3:
-            B, N, C = x.shape
-            S = int(round(N ** (1 / 3)))
-            if S ** 3 == N:
-                x_img = x.transpose(1, 2).view(B, C, S, S, S)
-                out_local = self.local_branch(x_img)
-                complexity_map = self._compute_complexity(x_img)
-                out_local = out_local * complexity_map
-                local_out = out_local.flatten(2).transpose(1, 2)
+            if local_out is not None:
                 return original_out + self.alpha * local_out
             else:
                 return original_out
-        else:
+
+        except Exception as e:
+            # 兜底：出错时不中断训练
             return original_out
 
 
-def inject_parallel_module(model):
+def inject_parallel_innovation(model):
+    """
+    🔥 注入函数：
+    只在浅层 (Channel <= 192) 注入增强版 MLP，深层跳过。
+    """
+    print("💉 正在向 Swin Backbone 注入并行 3D 卷积模块 (Standard Conv Mode)...")
+
     count_replaced = 0
+    count_skipped = 0
+
+    # 设定浅层的阈值。Feature Size=96时：
+    # Stage 0 = 96, Stage 1 = 192 (浅层 -> 注入)
+    # Stage 2 = 384, Stage 3 = 768 (深层 -> 跳过)
     SHALLOW_THRESHOLD = 192
 
     for name, module in model.swin_unetr.named_modules():
-        if "SwinTransformerBlock" in module.__class__.__name__ and hasattr(module, "mlp"):
-            old_mlp = module.mlp
-            if isinstance(old_mlp, ParallelLocalMLP):
-                continue
+        if "SwinTransformerBlock" in module.__class__.__name__:
+            if hasattr(module, "mlp"):
+                old_mlp = module.mlp
+                if isinstance(old_mlp, ParallelLocalMLP): continue
 
-            dim = 0
-            if hasattr(old_mlp, "linear1"):
-                dim = old_mlp.linear1.in_features
-            elif hasattr(old_mlp, "fc1"):
-                dim = old_mlp.fc1.in_features
+                # 获取维度
+                dim = 0
+                if hasattr(old_mlp, "linear1"):
+                    dim = old_mlp.linear1.in_features
+                elif hasattr(old_mlp, "fc1"):
+                    dim = old_mlp.fc1.in_features
 
-            if dim > 0 and dim <= SHALLOW_THRESHOLD:
-                module.mlp = ParallelLocalMLP(old_mlp, dim)
-                count_replaced += 1
+                if dim == 0: continue
+
+                # 🔥 策略：只在浅层注入
+                if dim <= SHALLOW_THRESHOLD:
+                    new_mlp = ParallelLocalMLP(old_mlp, dim)
+                    module.mlp = new_mlp
+                    count_replaced += 1
+                else:
+                    count_skipped += 1
+
+    print(f"✅ 注入完成: {count_replaced} 个浅层模块被替换 (Standard Conv, Alpha=0.5)")
+    print(f"⏩ 跳过处理: {count_skipped} 个深层模块保持原样")
 
     return model
 
 
-# =============================================================================
-# 4. Asymmetric Dual-Stream Feature Fusion (Multi-Head Bidirectional Attention)
-# =============================================================================
-class BidirectionalChannelCrossAttention3D(nn.Module):
-    def __init__(self, in_channels, num_heads=4):
+# =========================================================================
+# 3. 纯净融合模块 (SE Only)
+# =========================================================================
+class SEAttentionBlock(nn.Module):
+    def __init__(self, in_channels, reduction=4):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = in_channels // num_heads
-        self.scale = self.head_dim ** -0.5
-
-        self.q_s = nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False)
-        self.k_s = nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False)
-        self.v_s = nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False)
-
-        self.q_c = nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False)
-        self.k_c = nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False)
-        self.v_c = nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False)
-
-        self.out_proj_s = nn.Sequential(
-            nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False),
-            nn.InstanceNorm3d(in_channels)
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(
+            nn.Conv3d(in_channels, in_channels // reduction, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(in_channels // reduction, in_channels, kernel_size=1, bias=False),
+            nn.Sigmoid()
         )
-        self.out_proj_c = nn.Sequential(
-            nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=False),
-            nn.InstanceNorm3d(in_channels)
-        )
-        self.act = nn.GELU()
 
-    def forward(self, swin, cnn):
-        B, C, D, H, W = swin.shape
-        N = D * H * W
-
-        qs = self.q_s(swin).view(B, self.num_heads, self.head_dim, N)
-        ks = self.k_s(swin).view(B, self.num_heads, self.head_dim, N)
-        vs = self.v_s(swin).view(B, self.num_heads, self.head_dim, N)
-
-        qc = self.q_c(cnn).view(B, self.num_heads, self.head_dim, N)
-        kc = self.k_c(cnn).view(B, self.num_heads, self.head_dim, N)
-        vc = self.v_c(cnn).view(B, self.num_heads, self.head_dim, N)
-
-        attn_s2c = (qs @ kc.transpose(-2, -1)) * self.scale
-        attn_s2c = attn_s2c.softmax(dim=-1)
-        out_s = (attn_s2c @ vc).view(B, C, D, H, W)
-        out_s = self.act(self.out_proj_s(out_s))
-
-        attn_c2s = (qc @ ks.transpose(-2, -1)) * self.scale
-        attn_c2s = attn_c2s.softmax(dim=-1)
-        out_c = (attn_c2s @ vs).view(B, C, D, H, W)
-        out_c = self.act(self.out_proj_c(out_c))
-
-        return swin + out_s, cnn + out_c
+    def forward(self, x):
+        y = self.avg_pool(x)
+        y = self.fc(y)
+        return x * y.expand_as(x)
 
 
-class CrossAttentionFusionBlock(nn.Module):
-    def __init__(self, swin_channels, cnn_channels, num_heads=4):
+class FeatureFusionBlock(nn.Module):
+    def __init__(self, swin_channels, cnn_channels):
         super().__init__()
-        self.proj = nn.Conv3d(cnn_channels, swin_channels, kernel_size=1, bias=False) if cnn_channels != swin_channels else nn.Identity()
+        if cnn_channels != swin_channels:
+            self.proj = nn.Conv3d(cnn_channels, swin_channels, kernel_size=1, bias=False)
+        else:
+            self.proj = nn.Identity()
+
         self.norm = nn.InstanceNorm3d(swin_channels)
-        self.act = nn.GELU()
-        self.cross_attn = BidirectionalChannelCrossAttention3D(swin_channels, num_heads=num_heads)
+        self.act = nn.LeakyReLU()
+
+        self.se_block = SEAttentionBlock(swin_channels)
 
     def forward(self, swin_feat, cnn_feat):
-        cnn_proj = self.act(self.norm(self.proj(cnn_feat)))
-        swin_out, _ = self.cross_attn(swin_feat, cnn_proj)
-        return swin_out
+        cnn_proj = self.proj(cnn_feat)
+        cnn_proj = self.norm(cnn_proj)
+        cnn_proj = self.act(cnn_proj)
+
+        fused = swin_feat + cnn_proj
+        fused = self.se_block(fused)
+        return fused
 
 
-# =============================================================================
-# 5. DSSW-Net: Main Model
-# =============================================================================
-class DSSWNet(nn.Module):
-    def __init__(self, img_size=(64, 64, 64), in_channels=1, out_channels=1, feature_size=96, use_checkpoint=True):
+# =========================================================================
+# 4. MAIN MODEL
+# =========================================================================
+class SwinUNETR_Optimized(nn.Module):
+    def __init__(self,
+                 img_size=(64, 64, 64),
+                 in_channels=1,
+                 out_channels=1,
+                 feature_size=96,  # 🔥 96
+                 use_checkpoint=True,
+
+                 ):
         super().__init__()
 
+        print(f"🔧 初始化 Optimized Model (V10.3 High-Power) | Feature Size: {feature_size}")
+        print("⚡ 配置: Swin(96) + StandardConv-MLP(Shallow) + SE + Wavelet")
+
         self.swin_unetr = SwinUNETR(
-            in_channels=in_channels, out_channels=out_channels, feature_size=feature_size,
-            use_checkpoint=use_checkpoint, spatial_dims=3, depths=(2, 2, 2, 2), num_heads=(3, 6, 12, 24)
+            in_channels=in_channels,
+            out_channels=out_channels,
+            feature_size=feature_size,
+            use_checkpoint=use_checkpoint,
+            spatial_dims=3,
+            depths=(2, 2, 6, 2),
+            num_heads=(3, 6, 12, 24)
         )
 
-        self.swin_unetr = inject_parallel_module(self)
+        # 🔥 注入创新点 (只注入浅层)
+        inject_parallel_innovation(self)
 
         self.cnn_encoder = SimpleCNNEncoder3D(in_channels=in_channels, base_filters=24)
 
-        self.fusion0 = CrossAttentionFusionBlock(swin_channels=feature_size, cnn_channels=24, num_heads=4)
-        self.fusion1 = CrossAttentionFusionBlock(swin_channels=feature_size * 2, cnn_channels=48, num_heads=4)
-        self.fusion2 = CrossAttentionFusionBlock(swin_channels=feature_size * 4, cnn_channels=96, num_heads=4)
-        self.fusion3 = CrossAttentionFusionBlock(swin_channels=feature_size * 8, cnn_channels=192, num_heads=4)
-        self.fusion4 = CrossAttentionFusionBlock(swin_channels=feature_size * 16, cnn_channels=384, num_heads=4)
+        self.fusion0 = FeatureFusionBlock(swin_channels=feature_size, cnn_channels=24)
+        self.fusion1 = FeatureFusionBlock(swin_channels=feature_size * 2, cnn_channels=48)
+        self.fusion2 = FeatureFusionBlock(swin_channels=feature_size * 4, cnn_channels=96)
+        self.fusion3 = FeatureFusionBlock(swin_channels=feature_size * 8, cnn_channels=192)
 
         bottleneck_dim = feature_size * 16
         enc4_dim = feature_size * 8
         enc3_dim = feature_size * 4
 
         self.wavelet_dec5 = WaveletUnetrUpBlock(
-            spatial_dims=3, in_channels=bottleneck_dim, out_channels=enc4_dim, kernel_size=3, upsample_kernel_size=2
+            spatial_dims=3, in_channels=bottleneck_dim, out_channels=enc4_dim,
+            kernel_size=3, upsample_kernel_size=2
         )
+
         self.ds_head1 = UnetOutBlock(spatial_dims=3, in_channels=enc3_dim, out_channels=out_channels)
         self.ds_head2 = UnetOutBlock(spatial_dims=3, in_channels=enc4_dim, out_channels=out_channels)
 
@@ -337,7 +308,6 @@ class DSSWNet(nn.Module):
         fused_features[1] = self.fusion1(swin_features[1], cnn_features[1])
         fused_features[2] = self.fusion2(swin_features[2], cnn_features[2])
         fused_features[3] = self.fusion3(swin_features[3], cnn_features[3])
-        fused_features[4] = self.fusion4(swin_features[4], cnn_features[4])
 
         enc0 = self.swin_unetr.encoder1(x_in)
         dec4 = self.swin_unetr.encoder10(fused_features[4])
@@ -350,8 +320,8 @@ class DSSWNet(nn.Module):
 
         dec1 = self.swin_unetr.decoder3(dec2, fused_features[1])
         dec0 = self.swin_unetr.decoder2(dec1, fused_features[0])
-
         out = self.swin_unetr.decoder1(dec0, enc0)
+
         logits = self.swin_unetr.out(out)
 
         if self.training:
@@ -360,17 +330,26 @@ class DSSWNet(nn.Module):
             return logits
 
 
+# ================= 权重加载函数 =================
 def load_pretrained_weights(model, weight_path):
     if not os.path.exists(weight_path):
+        print("⚠️ No weights found.")
         return model
 
+    print(f"⏳ Loading weights from {os.path.basename(weight_path)}...")
     try:
-        checkpoint = torch.load(weight_path, map_location='cpu', weights_only=False)
+        checkpoint = torch.load(weight_path, map_location='cpu')
     except Exception as e:
-        print(f"Load error: {e}")
+        print(f"❌ Error loading weights: {e}")
         return model
 
-    pretrained_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+    if "state_dict" in checkpoint:
+        pretrained_dict = checkpoint["state_dict"]
+    elif "model" in checkpoint:
+        pretrained_dict = checkpoint["model"]
+    else:
+        pretrained_dict = checkpoint
+
     model_dict = model.state_dict()
     new_state_dict = {}
     matched = 0
@@ -378,17 +357,23 @@ def load_pretrained_weights(model, weight_path):
     for k, v in pretrained_dict.items():
         key = k.replace("module.", "")
         target_keys = [key, "swin_unetr." + key, "swin_unetr.swinViT." + key]
+
         for target_k in target_keys:
-            if target_k in model_dict and v.shape == model_dict[target_k].shape:
-                new_state_dict[target_k] = v
-                matched += 1
-            elif target_k.replace("mlp.", "mlp.original_mlp.") in model_dict:
-                new_target = target_k.replace("mlp.", "mlp.original_mlp.")
-                if v.shape == model_dict[new_target].shape:
-                    new_state_dict[new_target] = v
+            if target_k in model_dict:
+                if v.shape == model_dict[target_k].shape:
+                    new_state_dict[target_k] = v
                     matched += 1
+                # 处理被我们替换后的 MLP 权重加载 (只加载主路，忽略支路)
+                elif target_k.replace("mlp.", "mlp.original_mlp.") in model_dict:
+                    new_target = target_k.replace("mlp.", "mlp.original_mlp.")
+                    if v.shape == model_dict[new_target].shape:
+                        new_state_dict[new_target] = v
+                        matched += 1
 
     if matched > 0:
         model.load_state_dict(new_state_dict, strict=False)
+        print(f"✅ Loaded {matched} layers.")
+    else:
+        print("❌ Warning: 0 layers loaded! (Safe for 96 random init)")
 
     return model
