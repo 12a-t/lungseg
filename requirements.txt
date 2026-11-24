@@ -1,16 +1,14 @@
-# Core dependencies
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.24.0
-scipy>=1.10.0
-pandas>=1.5.0
-
-# MONAI for medical imaging (SwinUNETR backbone)
-monai>=1.3.0
-
-# Visualization and progress
-matplotlib>=3.7.0
-tqdm>=4.65.0
-
-# CUDA version compatibility
-# This configuration was tested with CUDA 11.7 and cuDNN 8.5
+# Python 3.10 recommended.
+# Install an appropriate CUDA-enabled PyTorch build separately first.
+# Current model.py calls SwinUNETR without img_size; MONAI 1.5.x is compatible with that API.
+# Dependency ranges are recommended for compatibility; they are NOT the verified historical training environment.
+monai>=1.5.1,<1.6
+numpy>=1.26,<2
+scipy>=1.11,<1.15
+pandas>=2.0,<2.3
+SimpleITK>=2.3,<3
+pylidc>=0.2.3
+pydicom>=2.4,<3
+lungmask>=0.2.18
+tqdm>=4.65
+matplotlib>=3.7
