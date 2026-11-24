@@ -1,93 +1,105 @@
 # DSSW-Net: Structure and Frequency Aware Dual-Stream Swin-Wavelet Network for 3D Lung Nodule Segmentation
 
-PyTorch implementation for **known-location lung nodule ROI segmentation**. The manuscript has been submitted to *Medical Physics*; a DOI and publication status should be added only after confirmation.
+Official code repository for **DSSW-Net**, a dual-stream framework for **3D lung nodule segmentation within predefined regions of interest (ROIs)**. This repository implements segmentation of nodules at known locations; it is **not** a whole-lung nodule detection pipeline.
 
-> **Reproducibility notice:** The supplied `model.py` implements a trainable stride-2 Conv3d-based wavelet-like downsampling block, channel-to-space rearrangement for upsampling, and standard Conv3d (`groups=1`) in the parallel local MLP branch. These are not identical to the fixed Haar DWT/IDWT and depth-wise convolution operators described in the current manuscript. This README describes the code as implemented; it does not claim that unverified results reproduce the published/manuscript metrics.
+**Manuscript:** *Structure and Frequency Aware Dual-Stream Swin-Wavelet Network for 3D Lung Nodule Segmentation* — under review at *Medical Physics*.
 
-## Files
+## Overview
 
-| File | Role |
+DSSW-Net combines a Swin Transformer semantic stream with a CNN-based detail stream. The current `model.py` includes a parallel local convolution branch within shallow Swin blocks, wavelet-inspired feature downsampling and reconstruction, and **3D squeeze-and-excitation (SE) feature fusion**. Two auxiliary outputs provide deep supervision during training.
+
+> **Implementation note:** The retained model uses learnable stride-2 convolutions for wavelet-like downsampling and standard 3D convolutions in its local branch. These are not mathematically identical to fixed Haar DWT/IDWT and depth-wise convolutions described in the manuscript. Verify the experimental implementation before claiming exact architectural or numerical reproduction.
+
+## Repository Structure
+
+| File | Description |
 |---|---|
-| `model.py` | `SwinUNETR_Optimized` dual-stream network, deep supervision and SE fusion |
-| `dataset.py` | Reads 96³ preprocessed ROIs, trains on 64³ patches with spatial augmentations |
-| `loss.py` | Dice, Focal and signed-distance Boundary losses (GitHub version clips distance values to [-5,5]) |
-| `train.py` | 100 epochs, AdamW, cosine schedule, batch size 4 and accumulation 4 |
-| `preprocess.py` | LIDC-IDRI preprocessing, annotation consensus and 96³ ROI extraction |
-| `inference.py` | 64³ center-patch or sliding-window prediction; threshold 0.5, min component 50 voxels |
-| `evaluate.py` | Per-nodule metrics, subgroups, 2,000 patient-cluster bootstrap and optional three-run statistics |
+| `model.py` | DSSW-Net architecture (`SwinUNETR_Optimized`) |
+| `dataset.py` | ROI loading, 64³ patch extraction and data augmentation |
+| `loss.py` | Dice, Focal and Boundary losses |
+| `train.py` | Training and validation |
+| `preprocess.py` | LIDC-IDRI preprocessing and 96³ ROI generation |
+| `inference.py` | Model inference and prediction-mask generation |
+| `evaluate.py` | Segmentation evaluation |
+| `requirements.txt` | Python dependencies |
 
-**Input geometry:** `96×96×96` is the saved ROI. A `64×64×64` patch is supplied to the model, whose main output is also `64×64×64`. The model's `feature_size=96` specifies feature **channels**, not spatial dimensions.
+## Data Preparation
 
-## Environment: Windows / PyCharm
+CT images are resampled to **1 mm isotropic spacing** and preprocessed into **96 × 96 × 96** nodule-centered ROIs. During training, **64 × 64 × 64** patches are extracted; the model predicts masks at the same 64³ resolution.
 
-Use Python 3.10 and a PyTorch build compatible with your CUDA driver (install PyTorch separately before other dependencies). Then:
-
-```powershell
-pip install -r requirements.txt
-python -c "import torch, monai; print('torch:',torch.__version__, 'monai:',monai.__version__, 'cuda:',torch.cuda.is_available())"
-```
-
-The current `model.py` constructs MONAI `SwinUNETR` **without** the `img_size` argument; a compatible 1.5.x MONAI release is therefore recommended. MONAI 1.3.x requires `img_size`, while MONAI 1.5.x removed it. This is a compatibility recommendation, not proof of the original experiment environment. Test your real checkpoint before any reproduction claim.
-
-## Data layout
+Expected preprocessed data layout:
 
 ```text
 LIDC/
-├── lung/                               # Preprocessed CT ROI .npy, shape [96,96,96]
-├── mask/                               # Consensus segmentation .npy, shape [96,96,96]
-└── detailed_dataset_metadata.csv      # At minimum: FileName, PatientID, subset, class_target
+├── lung/                            # CT ROI arrays (.npy), shape 96×96×96
+├── mask/                            # Corresponding masks (.npy), shape 96×96×96
+└── detailed_dataset_metadata.csv   # Patient-level train/val/test metadata
 ```
 
-`subset` must be one of `train`, `val`, `test`. Keep a **patient-level split** with no patient shared across splits. The preprocessing script by default creates `preprocessed_nodules.csv`, **not** a historical train/val/test split; to reproduce the manuscript, provide the actual split file from the experiment. Do not regenerate a new random split and label it as the original study.
+The metadata file must include `FileName`, `PatientID`, `subset` (`train`, `val`, or `test`) and `class_target` (1 for nodules). Data splits must be performed **at the patient level**, without leakage across subsets. `preprocess.py` creates `preprocessed_nodules.csv` by default; this is **not** a replacement for the actual experimental split file.
 
-The internal manuscript cohort has 1,343 nodules from 1,010 eligible patients; the held-out test set contains 282 nodules. These numbers are historical dataset descriptors and are **not** produced or guaranteed by this source code.
+For raw LIDC-IDRI preprocessing, configure `LIDC_DICOM_ROOT` and `LIDC_OUTPUT_ROOT`, then run:
 
-`preprocess.py` is specific to LIDC-IDRI/pylidc. The independent clinical cohort requires its own approved external-data import and verified annotations. Do not publish patient-identifying information.
+```bash
+python preprocess.py
+```
 
-## Commands
+## Installation
 
-Point the project at your own data (replace Windows paths as appropriate):
+Python 3.10, a compatible CUDA-enabled PyTorch installation, and MONAI are recommended. The retained `model.py` constructs `SwinUNETR` without `img_size`; use a compatible MONAI release (for example, the 1.5.x API) and verify it with your environment.
+
+```bash
+pip install -r requirements.txt
+```
+
+For preprocessing, also ensure `pylidc`, `SimpleITK`, `pydicom`, and `lungmask` are installed. The current repository's dependency versions are not a verified record of the original experimental environment.
+
+## Training
+
+The training configuration uses AdamW, a cosine learning-rate schedule, 100 epochs, batch size 4, gradient accumulation over 4 mini-batches, and a Boundary Loss warm-up period. Adjust data and checkpoint paths to your local environment.
 
 ```powershell
-$env:DSSWNET_DATA_ROOT='D:\datasets\LIDC'
-$env:DSSWNET_CHECKPOINT_DIR='D:\experiments\DSSWNet\checkpoints'
-$env:LIDC_DICOM_ROOT='D:\datasets\raw_LIDC-IDRI'
-$env:LIDC_OUTPUT_ROOT='D:\datasets\LIDC'
-
+$env:DSSWNET_DATA_ROOT = 'D:\datasets\LIDC'
+$env:DSSWNET_CHECKPOINT_DIR = 'D:\experiments\DSSWNet\checkpoints'
 python train.py
+```
+
+## Inference
+
+Use the trained checkpoint to generate nodule segmentation predictions:
+
+```powershell
 python inference.py --subset test --mode center64 --checkpoint 'D:\experiments\DSSWNet\checkpoints\best_model.pth'
+```
+
+The default `center64` mode predicts the central **64³** patch of each 96³ ROI. The optional `sliding64` mode combines multiple 64³ predictions to reconstruct a **96³** ROI mask. These are **different evaluation protocols** and should not be mixed when comparing results. Inference uses a probability threshold of **0.5** and removes connected components smaller than **50 voxels** by default.
+
+Predictions and `inference_manifest.csv` are saved to `results_inference/` unless `--output-dir` is specified.
+
+## Evaluation
+
+Segmentation performance is assessed using **seven metrics**:
+
+- Dice Similarity Coefficient (Dice)
+- Intersection over Union (IoU)
+- Sensitivity
+- Precision
+- 95th Percentile Hausdorff Distance (HD95)
+- Average Surface Distance (ASD)
+- Surface Dice (1 mm tolerance)
+
+Run evaluation after inference:
+
+```bash
 python evaluate.py
 ```
 
-`center64` predicts the middle 64³ of the known 96³ ROI. The alternative `--mode sliding64` produces a 96³ prediction by blending multiple 64³ windows; the two modes are distinct **evaluation protocols** and should not be pooled. Both modes avoid selecting prediction crops from the ground-truth mask.
+Results are saved to `results_evaluation/` by default. The evaluation script also supports **subgroup analysis and statistical evaluation** for reproducing the analyses reported in the manuscript when the required metadata and independent-run results are available.
 
-`inference.py` removes foreground connected components smaller than **50 voxels** after thresholding at **0.5**. Note that `train.py`'s current validation Dice is calculated **without** this component filtering. Thus checkpoint selection and final postprocessed test Dice are not exactly the same computation. The manuscript does not specify whether validation used component filtering; do not silently reinterpret the historical selection protocol.
+## Reproducibility Notes
 
-## Metrics and statistical analysis
-
-`evaluate.py` reports per-nodule Dice, IoU, pixel sensitivity, precision, HD95, ASD and Surface Dice (1-mm tolerance). Its implementation uses count-weighted surface voxels, which is not necessarily identical to an area-weighted surface Dice library. Empty predictions have Dice = 0 but undefined HD95/ASD; inspect valid-case counts before interpreting boundary-metric averages.
-
-For three *actual independent runs* of DSSW-Net:
-
-```powershell
-python evaluate.py --run-csvs run1/per_nodule_metrics.csv run2/per_nodule_metrics.csv run3/per_nodule_metrics.csv --bootstrap 2000 --output-dir results_statistics
-```
-
-For Welch run-level comparison with three independently reproduced MedNeXt runs, add:
-
-```text
---reference-run-csvs med1/per_nodule_metrics.csv med2/per_nodule_metrics.csv med3/per_nodule_metrics.csv
-```
-
-No scores, p-values or CI bounds are hard-coded. Bootstrap requires real patient IDs and a fixed matched test cohort. Morphology subgroup metrics require real Solid/Sub-solid labels; the code does not infer these labels from imaging intensities.
-
-## Implementation caveats
-
-- The current uploaded `model.py` is structurally different from the fixed-Haar/depth-wise operators described in the manuscript; resolving this requires checking the actual experiment or correcting the paper, not relabeling code.
-- The `loss.py` currently present in the GitHub ZIP **clips the signed distance map to [-5,5]**. A separately provided older file did not; this changes the Boundary Loss. Keep the version actually used in your experimental runs.
-- Full GPU execution, original weight loading and reproduction of the reported results are **not** established by syntax checks or synthetic CPU unit tests.
-- `preprocess.py` depends on `pylidc`, `SimpleITK` and `lungmask` and requires local DICOM data and pylidc indexing/configuration.
+The reported study results depend on the original dataset selection, patient-level splits, trained checkpoints, and evaluation settings. The default center-patch validation in `train.py` does not apply the same connected-component filtering as `inference.py`; results from those two stages should not be treated as identical without verification. This repository does not provide whole-lung lesion detection.
 
 ## License
 
-MIT (see `LICENSE`).
+This project is distributed under the MIT License. See [LICENSE](LICENSE).
